@@ -1,9 +1,17 @@
+-- ndedupe.lua (uses lua-cjson for strict JSON parsing)
 -- jsonl-dedupe: 从 JSONL（每行 JSON）中按指定键去重并输出唯一行
 -- Usage:
 --   lua ndedupe.lua [input.jsonl] [key]
 -- Examples:
 --   lua ndedupe.lua data.jsonl id > unique.jsonl
 --   cat data.jsonl | lua ndedupe.lua - id > unique.jsonl
+
+local ok, cjson = pcall(require, "cjson")
+if not ok or not cjson then
+  io.stderr:write("Error: lua-cjson (cjson) module not found.\n")
+  io.stderr:write("Install with: luarocks install lua-cjson\n")
+  os.exit(2)
+end
 
 local inputPath = arg[1] or "-"
 local key = arg[2] or "id"
@@ -22,38 +30,41 @@ end
 
 local seen = {}
 local lineNo = 0
-
--- Try to extract key value (string or number) via simple patterns.
--- This intentionally uses lightweight pattern matching (not a full JSON parser)
--- so it works well for common JSONL where the key is a top-level field.
-local function extract_key_value(line, key)
-  -- match "key": "value"
-  local pattern_str = '"' .. key .. '%"%s*:%s*%"([^%"]+)%"'
-  local s = line:match(pattern_str)
-  if s then return s end
-  -- match "key": number (integer/float)
-  local pattern_num = '"' .. key .. '%"%s*:%s*([%d%.%-eE]+)'
-  local n = line:match(pattern_num)
-  if n then return n end
-  return nil
-end
+local warnCount = 0
 
 for raw in infile:lines() do
   lineNo = lineNo + 1
-  local id = extract_key_value(raw, key)
-  if id then
-    if not seen[id] then
-      seen[id] = true
+  if raw:match("^%s*$") then
+    -- skip empty lines
+  else
+    local ok2, obj = pcall(cjson.decode, raw)
+    if not ok2 or type(obj) ~= "table" then
+      warnCount = warnCount + 1
+      if warnCount <= 5 then
+        io.stderr:write(("warn: failed to parse JSON on line %d -- outputting raw line (further parse warnings suppressed)\n"):format(lineNo))
+      elseif warnCount == 6 then
+        io.stderr:write("warn: further JSON parse warnings suppressed\n")
+      end
+      -- emit raw line to preserve data
       io.write(raw, "\n")
     else
-      -- duplicate: skip
+      local val = obj[key]
+      if val == nil then
+        -- key missing: emit and warn occasionally
+        if lineNo % 1000 == 1 then
+          io.stderr:write(("warn: key '%s' not found in line %d\n"):format(key, lineNo))
+        end
+        io.write(raw, "\n")
+      else
+        local id = tostring(val)
+        if not seen[id] then
+          seen[id] = true
+          io.write(raw, "\n")
+        else
+          -- duplicate: skip
+        end
+      end
     end
-  else
-    -- If the key isn't found, emit the line but warn once per 1000 lines to stderr.
-    if lineNo % 1000 == 1 then
-      io.stderr:write(("warn: key '%s' not found in line %d (showing every 1000 warnings)\n"):format(key, lineNo))
-    end
-    io.write(raw, "\n")
   end
 end
 
